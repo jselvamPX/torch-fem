@@ -1,5 +1,6 @@
 import torch
 from scipy.sparse import coo_matrix as scipy_coo_matrix
+from scipy.sparse import diags as scipy_diags
 from scipy.sparse.linalg import minres as scipy_minres
 from scipy.sparse.linalg import spsolve as scipy_spsolve
 from torch import Tensor
@@ -10,6 +11,7 @@ available_backends = ["scipy"]
 try:
     import cupy
     from cupyx.scipy.sparse import coo_matrix as cupy_coo_matrix
+    from cupyx.scipy.sparse import diags as cupy_diags
     from cupyx.scipy.sparse.linalg import minres as cupy_minres
     from cupyx.scipy.sparse.linalg import spsolve as cupy_spsolve
 
@@ -27,11 +29,16 @@ class Solve(Function):
     """
 
     @staticmethod
-    def forward(ctx, A, b):
-        # Check the input and make sure it is coalesced
+    def forward(ctx, A, b, rtol=1e-10, device=None):
+        # Check the input shape
         if A.ndim != 2 or (A.shape[0] != A.shape[1]):
             raise ValueError("A should be a square 2D matrix.")
         shape = A.size()
+
+        # Move to requested device, if available
+        if device is not None:
+            A = A.to(device)
+            b = b.to(device)
 
         if A.device.type == "cuda" and "cupy" in available_backends:
             A_cp = cupy_coo_matrix(
@@ -45,7 +52,10 @@ class Solve(Function):
             if shape[0] < 10000:
                 x_xp = cupy_spsolve(A_cp, b_cp)
             else:
-                x_xp, exit_code = cupy_minres(A_cp, b_cp, tol=1e-10)
+                # Jacobi preconditioner
+                M = cupy_diags(1.0 / A_cp.diagonal())
+                # Solve with minres
+                x_xp, exit_code = cupy_minres(A_cp, b_cp, M=M, tol=rtol)
                 if exit_code != 0:
                     raise RuntimeError(f"minres failed with exit code {exit_code}")
         else:
@@ -56,7 +66,10 @@ class Solve(Function):
             if shape[0] < 10000:
                 x_xp = scipy_spsolve(A_np, b_np)
             else:
-                x_xp, exit_code = scipy_minres(A_np, b_np, rtol=1e-10)
+                # Jacobi preconditioner
+                M = scipy_diags(1.0 / A_np.diagonal())
+                # Solve with minres
+                x_xp, exit_code = scipy_minres(A_np, b_np, M=M, rtol=rtol)
                 if exit_code != 0:
                     raise RuntimeError(f"minres failed with exit code {exit_code}")
 
@@ -65,6 +78,8 @@ class Solve(Function):
 
         # Save the variables
         ctx.save_for_backward(A, x)
+        ctx.rtol = rtol
+        ctx.device = device
 
         return x
 
@@ -74,7 +89,7 @@ class Solve(Function):
         A, x = ctx.saved_tensors
 
         # Backprop rule: gradb = A^T @ grad
-        gradb = Solve.apply(A.T, grad)
+        gradb = Solve.apply(A.T, grad, ctx.rtol, ctx.device)
 
         # Backprop rule: gradA = -gradb @ x^T, sparse version
         row = A._indices()[0, :]
@@ -82,7 +97,7 @@ class Solve(Function):
         val = -gradb[row] * x[col]
         gradA = torch.sparse_coo_tensor(torch.stack([row, col]), val, A.shape)
 
-        return gradA, gradb
+        return gradA, gradb, None, None
 
 
 sparse_solve = Solve.apply
