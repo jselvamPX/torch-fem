@@ -7,7 +7,6 @@ from torch import Tensor
 
 
 class Element(ABC):
-
     def __init__(self):
         self.nodes: int
 
@@ -95,10 +94,12 @@ class Tria1(Element):
 
     def B(self, xi: Tensor) -> Tensor:
         if xi.dim() == 1:
-            return torch.tensor([[-1.0, 1.0, 0.0], [-1.0, 0.0, 1.0]])
+            return torch.tensor([[-1.0, 1.0, 0.0], [-1.0, 0.0, 1.0]], device=xi.device)
         else:
             N = xi.shape[0]
-            return torch.tensor([[-1.0, 1.0, 0.0], [-1.0, 0.0, 1.0]]).repeat(N, 1, 1)
+            return torch.tensor(
+                [[-1.0, 1.0, 0.0], [-1.0, 0.0, 1.0]], device=xi.device
+            ).repeat(N, 1, 1)
 
     def ipoints(self) -> Tensor:
         return torch.tensor([[1.0 / 3.0, 1.0 / 3.0]])

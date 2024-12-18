@@ -16,7 +16,7 @@ from .sparse import sparse_index_select, sparse_solve
 
 NDOF = 6
 NU = 0.5
-DRILL_PENALTY = 1.0
+DRILL_PENALTY = 100.0
 KAPPA = 5.0 / 6.0
 
 
@@ -31,6 +31,7 @@ class Shell:
         self.displacements = torch.zeros((N, NDOF))
         self.constraints = torch.zeros((N, NDOF), dtype=torch.bool)
         self.thickness = torch.ones(len(elements))
+        self.material = material
         self.C = material.C
         self.Cs = material.Cs
 
@@ -42,14 +43,19 @@ class Shell:
 
         # Compute mapping from local to global indices (hard to read, but fast)
         N = self.n_elem
-        idx = ((NDOF * self.elements).unsqueeze(-1) + torch.arange(NDOF)).reshape(N, -1)
+        self.idx = (
+            (NDOF * self.elements).unsqueeze(-1)
+            + torch.arange(NDOF, device=self.elements.device)
+        ).reshape(N, -1)
         self.indices = torch.stack(
             [
-                idx.unsqueeze(-1).expand(N, -1, idx.shape[1]),
-                idx.unsqueeze(1).expand(N, idx.shape[1], -1),
+                self.idx.unsqueeze(-1).expand(N, -1, self.idx.shape[1]),
+                self.idx.unsqueeze(1).expand(N, self.idx.shape[1], -1),
             ],
             dim=0,
         )
+
+        self.K = torch.empty(0)
 
     def _Dm(self, B):
         """Aggregate strain-displacement matrices
@@ -206,13 +212,16 @@ class Shell:
 
     def solve(self):
         # Compute global stiffness matrix
-        K = self.stiffness()
+        if self.K is None or self.K.numel() == 0:
+            self.K = self.stiffness()
+        else:
+            print("Using pre-defined Shell Stiffness")
 
         # Get reduced stiffness matrix
         con = torch.nonzero(self.constraints.ravel(), as_tuple=False).ravel()
         uncon = torch.nonzero(~self.constraints.ravel(), as_tuple=False).ravel()
-        f_d = sparse_index_select(K, [None, con]) @ self.displacements.ravel()[con]
-        K_red = sparse_index_select(K, [uncon, uncon])
+        f_d = sparse_index_select(self.K, [None, con]) @ self.displacements.ravel()[con]
+        K_red = sparse_index_select(self.K, [uncon, uncon])
         f_red = (self.forces.ravel() - f_d)[uncon]
 
         # Solve for displacement
@@ -221,7 +230,7 @@ class Shell:
         u[uncon] = u_red
 
         # Evaluate force
-        f = K @ u
+        f = self.K @ u
 
         u = u.reshape((-1, NDOF))
         f = f.reshape((-1, NDOF))
@@ -249,7 +258,7 @@ class Shell:
         h = sqrt(2) * A
         alpha = KAPPA / (2 * (1 + NU))
         psi = KAPPA * self.thickness**2 / (self.thickness**2 + alpha * h**2)
-        Cs = torch.einsum("i,jk->ijk", psi, self.Cs)
+        Cs = torch.einsum("i,ijk->ijk", psi, self.Cs)
         sigma_s = torch.einsum("...ij,...jk,...k->...i", Cs, self._Ds(A), loc_disp)
 
         # Assemble stress tensor

@@ -29,7 +29,9 @@ class FEM(ABC):
         self.constraints = torch.zeros_like(nodes, dtype=torch.bool)
 
         # Compute mapping from local to global indices
-        idx = (self.n_dim * self.elements).unsqueeze(-1) + torch.arange(self.n_dim)
+        idx = (self.n_dim * self.elements).unsqueeze(-1) + torch.arange(
+            self.n_dim, device=self.elements.device
+        )
         self.idx = idx.reshape(self.n_elem, -1).to(torch.int32)
 
         # Vectorize material
@@ -193,7 +195,7 @@ class FEM(ABC):
         self.K = torch.empty(0)
 
         # Initialize displacement increment
-        du = torch.zeros_like(self.nodes).ravel()
+        du = torch.zeros_like(self.displacements).ravel()
 
         # Incremental loading
         for n in range(1, N):
